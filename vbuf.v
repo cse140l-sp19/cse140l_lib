@@ -144,7 +144,7 @@ assign vram_wr_clk = vram_clk; //l_count[3];
 reg [8:0] w_addr_user, w_addr_displaying_clk;
 
 // bitmap [(512-64):0] for displaying clock
-//`define BUFFER_BITMAP
+`define BUFFER_BITMAP
 `ifdef BUFFER_BITMAP
 reg [BYTES_PER_RAW*RAWS_4_CLK-1:0] bitmap;
 `else
