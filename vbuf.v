@@ -494,3 +494,4 @@ ram512X8_inst (
 )/* synthesis syn_noprune=1 */;
 
 endmodule
+
