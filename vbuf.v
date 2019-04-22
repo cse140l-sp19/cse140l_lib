@@ -78,16 +78,25 @@ output wire [7:0] data_out ,
 output wire data_out_rdy
 ) ;
 
+`define USE_USER_LIB
+//`define USE_N_BIT_ADDER  
+
 
 //@96MHz & 921600 baud, each byte (8 + 2 stop + 1 start) need 1045.83 cycles to go through UART
-parameter CYCLES_PER_BYTE = 11'd1100; //11'd1050;
+//@48MHz & 460800 baud, each byte also need 1045.83 cycles
+//@24MHz & 230400 baud, each byte also need 1045.83 cycles
+//@12MHz & 115200 baud, each byte also need 1045.83 cycles
+parameter CLKFREQ  = 12000000;    // frequency of incoming signal 'clk'
+parameter BAUD     =  115200;
+`define BITS_PER_BYTE 10  //1 start, 2 stop bits
+localparam CYCLES_PER_BYTE = ((`CLKFREQ / `BAUD) * `BITS_PER_BYTE) + 60; //11'd1100; //11'd1050; 
 //parameter for display
-parameter BYTES_PER_RAW = 32;
-parameter RAWS_4_USER = 2;
-parameter RAWS_4_CLK = 14;
-parameter LAST_BYTES_4_USER  = (RAWS_4_USER*BYTES_PER_RAW - 1);               //user can input 64 bytes
+localparam BYTES_PER_RAW = 32;
+localparam RAWS_4_USER = 2;
+localparam RAWS_4_CLK = 14;
+localparam LAST_BYTES_4_USER  = (RAWS_4_USER*BYTES_PER_RAW - 1);               //user can input 64 bytes
 //parameter LAST_BYTES_4_CLK = ((RAWS_4_CLK + RAWS_4_USER)* BYTES_PER_RAW - 3 - 1); //64 - 508 is for displaying clk
-parameter LAST_BYTES_4_CLK = ((RAWS_4_CLK + RAWS_4_USER)* BYTES_PER_RAW - 1); //64 - 511 is for displaying clk
+localparam LAST_BYTES_4_CLK = ((RAWS_4_CLK + RAWS_4_USER)* BYTES_PER_RAW - 1); //64 - 511 is for displaying clk
 
 // hold data read from sb_ram
 reg [8:0] r_addr;
@@ -100,17 +109,45 @@ assign data_out[7:0] = r_data_reg [7:0];
 // control the read clk
 reg [10:0] l_count;  
 
+wire [10:0] cycles_per_byte = CYCLES_PER_BYTE;
 
+`ifdef USE_USER_LIB
+
+`ifdef USE_N_BIT_ADDER
+defparam vbuf_count.N = 11;
+wire [10:0] o_adder_vbuf_count;
+N_bit_adder vbuf_count(
+.sum (o_adder_vbuf_count[10:0])   , // Output of the adder
+.carry()                          , // Carry output of adder
+.r1 (l_count[10:0])               , // first input
+.r2 (11'h001)                        , // second input
+.ci (1'b0)                            // carry input
+);
+
+`else  // ~USE_N_BIT_ADDER
+wire [10:0] o_adder_vbuf_count;
+defparam vbuf_count.N = 11;
+N_bit_counter vbuf_count(
+.result (o_adder_vbuf_count)       , // Output
+.r1 (l_count)                      , // input
+.up (1'b1)
+);
+`endif  // ~USE_N_BIT_ADDER
+`endif  // USE_USER_LIB
 //generate clk for reading 1-byte from the read port
 always @(posedge vram_clk) begin
     if(reset) begin
         l_count <= 0;
     end
     else begin
-        if(l_count == CYCLES_PER_BYTE)
+        if(l_count[10:0] == cycles_per_byte)
             l_count <= 0;
         else 
-            l_count <= l_count+1;
+`ifdef USE_USER_LIB
+            l_count[10:0] <= o_adder_vbuf_count[10:0]; 
+`else
+            l_count[10:0] <= l_count+1; //o_adder_vbuf_count[10:0]; //
+`endif
     end
 end
 
@@ -123,17 +160,51 @@ assign trig_rd = (&l_count[9:1]) & (~l_count[10]);
 // slow down read clk
 wire vram_rd_clk;
 assign vram_rd_clk = l_count[4];
-
+reg [1:0] vram_rd_clk_det;
 // latch in @ the negedge of read clk
-always @(negedge vram_rd_clk) begin
-    r_data_reg[7:0] <= r_data_wire[7:0];
+//always @(negedge vram_rd_clk) begin
+always @ (negedge vram_clk) begin
+    vram_rd_clk_det[1:0] = {vram_rd_clk_det[0], vram_rd_clk};
+    
+    r_data_reg[7:0] <= (vram_rd_clk_det[0] & ~vram_rd_clk_det[1])? r_data_wire[7:0]: r_data_reg[7:0];
 end
+`ifdef USE_USER_LIB
+`ifdef USE_N_BIT_ADDER
+wire [8:0] o_adder_vbuf_r_addr;
+defparam vbuf_raddr.N = 9;
+N_bit_adder vbuf_raddr(
+.sum (o_adder_vbuf_r_addr[8:0])     , // Output of the adder
+.carry()                            , // Carry output of adder
+.r1 (r_addr)                        , // first input
+.r2 (9'h001)                        , // second input
+.ci (1'b0)                            // carry input
+);
 
-always @(posedge trig_rd) begin
+`else // ~ USE_N_BIT_ADDER
+wire [8:0] o_adder_vbuf_r_addr;
+defparam vbuf_raddr.N = 9;
+N_bit_counter vbuf_raddr(
+.result (o_adder_vbuf_r_addr)     , // Output
+.r1 (r_addr)                      , // input
+.up (1'b1)
+);
+`endif // ~USE_N_BIT_ADDER
+`endif // USE_USER_LIB
+
+reg [1:0] trig_rd_det;
+//always @(posedge trig_rd) begin
+always @(posedge vram_clk) begin
     if(reset)
 	    r_addr <= 0;
 	else
-        r_addr <= r_addr + 1;
+       trig_rd_det[1:0] = {trig_rd_det[0], trig_rd};
+`ifdef USE_USER_LIB
+        r_addr[8:0] <=  (trig_rd_det[0] & ~trig_rd_det[1])? o_adder_vbuf_r_addr[8:0]: r_addr[8:0]; 
+        //r_addr[8:0] <=  o_adder_vbuf_r_addr[8:0]; 
+`else
+        r_addr[8:0] <=  (trig_rd_det[0] & ~trig_rd_det[1])? r_addr + 1: r_addr[8:0]; 
+        //r_addr[8:0] <=  r_addr + 1; 
+`endif
 end
 
 //---------- write port
@@ -141,7 +212,32 @@ wire vram_wr_clk;
 assign vram_wr_clk = vram_clk; //l_count[3];
 // address -- address 0-63 for user input
 //                    64 - 509 for displying clk
+reg       w_user_data_rdy;
+reg [7:0] w_user_data;
+reg       w_user_cr;
+reg       w_user_lf;
+
 reg [8:0] w_addr_user, w_addr_displaying_clk;
+wire [7:0] w_data_user = w_user_data[7:0];
+
+always @*// (posedge vram_clk)
+begin
+        w_user_data_rdy = 0;
+        w_user_cr = 0;
+        w_user_lf = 0;
+        w_user_data[7:0] = 8'h00;
+
+        if(~(|data_in[7:4]) & data_in[3] & data_in[2] & (~data_in[1]) & data_in[0])     //  == 8'h0D) begin    //CR
+            w_user_cr = 1;
+		else 
+		if (~(|data_in[7:4]) & data_in[3] & (~data_in[2]) & data_in[1] & (~data_in[0])) //  == 8'h0A) begin    //LF
+            w_user_lf = 1;
+		else
+		begin
+            w_user_data_rdy = data_in_rdy;
+            w_user_data[7:0] = data_in[7:0];
+		end
+end
 
 // bitmap [(512-64):0] for displaying clock
 `define BUFFER_BITMAP
@@ -150,97 +246,97 @@ reg [BYTES_PER_RAW*RAWS_4_CLK-1:0] bitmap;
 `else
 wire [BYTES_PER_RAW*RAWS_4_CLK-1:0] bitmap;
 //a
-assign bitmap[ 37: 34] = (segment4[0])? 4'hf: 4'h0;	
-assign bitmap[ 43: 40] = (segment3[0])? 4'hf: 4'h0; 
-assign bitmap[ 55: 52] = (segment2[0])? 4'hf: 4'h0; 	
-assign bitmap[ 61: 58] = (segment1[0])? 4'hf: 4'h0;	
+assign bitmap[ 37: 34] = {segment4[0], segment4[0], segment4[0], segment4[0]}; //(segment4[0])? 4'hf: 4'h0;	
+assign bitmap[ 43: 40] = {segment3[0], segment3[0], segment3[0], segment3[0]}; //(segment3[0])? 4'hf: 4'h0; 
+assign bitmap[ 55: 52] = {segment2[0], segment2[0], segment2[0], segment2[0]}; //(segment2[0])? 4'hf: 4'h0; 	
+assign bitmap[ 61: 58] = {segment1[0], segment1[0], segment1[0], segment1[0]}; //(segment1[0])? 4'hf: 4'h0;	
         
 //f
-assign bitmap[ 66] = (segment4[5])? 1'b1: 1'b0;	
-assign bitmap[ 98] = (segment4[5])? 1'b1: 1'b0;	
-assign bitmap[130] = (segment4[5])? 1'b1: 1'b0;	
+assign bitmap[ 66] = segment4[5]; //(segment4[5])? 1'b1: 1'b0;	
+assign bitmap[ 98] = segment4[5]; //(segment4[5])? 1'b1: 1'b0;	
+assign bitmap[130] = segment4[5]; //(segment4[5])? 1'b1: 1'b0;	
 
-assign bitmap[ 72] = (segment3[5])? 1'b1: 1'b0;	
-assign bitmap[104] = (segment3[5])? 1'b1: 1'b0;	
-assign bitmap[136] = (segment3[5])? 1'b1: 1'b0;	
+assign bitmap[ 72] = segment3[5]; //(segment3[5])? 1'b1: 1'b0;	
+assign bitmap[104] = segment3[5]; //(segment3[5])? 1'b1: 1'b0;	
+assign bitmap[136] = segment3[5]; //(segment3[5])? 1'b1: 1'b0;	
 		
-assign bitmap[ 84] = (segment2[5])? 1'b1: 1'b0;	
-assign bitmap[116] = (segment2[5])? 1'b1: 1'b0;	
-assign bitmap[148] = (segment2[5])? 1'b1: 1'b0;	
+assign bitmap[ 84] = segment2[5]; //(segment2[5])? 1'b1: 1'b0;	
+assign bitmap[116] = segment2[5]; //(segment2[5])? 1'b1: 1'b0;	
+assign bitmap[148] = segment2[5]; //(segment2[5])? 1'b1: 1'b0;	
 		
-assign bitmap[ 90] = (segment1[5])? 1'b1: 1'b0;	
-assign bitmap[122] = (segment1[5])? 1'b1: 1'b0;	
-assign bitmap[154] = (segment1[5])? 1'b1: 1'b0;	
+assign bitmap[ 90] = segment1[5]; //(segment1[5])? 1'b1: 1'b0;	
+assign bitmap[122] = segment1[5]; //(segment1[5])? 1'b1: 1'b0;	
+assign bitmap[154] = segment1[5]; //(segment1[5])? 1'b1: 1'b0;	
 
 //e
-assign bitmap[194] = (segment4[4])? 1'b1: 1'b0;	
-assign bitmap[226] = (segment4[4])? 1'b1: 1'b0;	
-assign bitmap[258] = (segment4[4])? 1'b1: 1'b0;	
+assign bitmap[194] = segment4[4]; //(segment4[4])? 1'b1: 1'b0;	
+assign bitmap[226] = segment4[4]; //(segment4[4])? 1'b1: 1'b0;	
+assign bitmap[258] = segment4[4]; //(segment4[4])? 1'b1: 1'b0;	
 
-assign bitmap[200] = (segment3[4])? 1'b1: 1'b0;	
-assign bitmap[232] = (segment3[4])? 1'b1: 1'b0;	
-assign bitmap[264] = (segment3[4])? 1'b1: 1'b0;	
+assign bitmap[200] = segment3[4]; //(segment3[4])? 1'b1: 1'b0;	
+assign bitmap[232] = segment3[4]; //(segment3[4])? 1'b1: 1'b0;	
+assign bitmap[264] = segment3[4]; //(segment3[4])? 1'b1: 1'b0;	
 		
-assign bitmap[212] = (segment2[4])? 1'b1: 1'b0;	
-assign bitmap[244] = (segment2[4])? 1'b1: 1'b0;	
-assign bitmap[276] = (segment2[4])? 1'b1: 1'b0;	
+assign bitmap[212] = segment2[4]; //(segment2[4])? 1'b1: 1'b0;	
+assign bitmap[244] = segment2[4]; //(segment2[4])? 1'b1: 1'b0;	
+assign bitmap[276] = segment2[4]; //(segment2[4])? 1'b1: 1'b0;	
 		
-assign bitmap[218] = (segment1[4])? 1'b1: 1'b0;	
-assign bitmap[250] = (segment1[4])? 1'b1: 1'b0;	
-assign bitmap[282] = (segment1[4])? 1'b1: 1'b0;	
+assign bitmap[218] = segment1[4]; //(segment1[4])? 1'b1: 1'b0;	
+assign bitmap[250] = segment1[4]; //(segment1[4])? 1'b1: 1'b0;	
+assign bitmap[282] = segment1[4]; //(segment1[4])? 1'b1: 1'b0;	
 		
 //d
-assign bitmap[293:290] = (segment4[3])? 4'hf: 4'h0;	
-assign bitmap[299:296] = (segment3[3])? 4'hf: 4'h0; 
-assign bitmap[311:308] = (segment2[3])? 4'hf: 4'h0; 	
-assign bitmap[317:314] = (segment1[3])? 4'hf: 4'h0;	
+assign bitmap[293:290] = {segment4[3], segment4[3], segment4[3], segment4[3]};//(segment4[3])? 4'hf: 4'h0;	
+assign bitmap[299:296] = {segment3[3], segment3[3], segment3[3], segment3[3]};//(segment3[3])? 4'hf: 4'h0; 
+assign bitmap[311:308] = {segment2[3], segment2[3], segment2[3], segment2[3]};//(segment2[3])? 4'hf: 4'h0; 	
+assign bitmap[317:314] = {segment1[3], segment1[3], segment1[3], segment1[3]};//(segment1[3])? 4'hf: 4'h0;	
 
 //c
-assign bitmap[197] = (segment4[2])? 1'b1: 1'b0;	
-assign bitmap[229] = (segment4[2])? 1'b1: 1'b0;	
-assign bitmap[261] = (segment4[2])? 1'b1: 1'b0;	
+assign bitmap[197] = segment4[2]; //(segment4[2])? 1'b1: 1'b0;	
+assign bitmap[229] = segment4[2]; //(segment4[2])? 1'b1: 1'b0;	
+assign bitmap[261] = segment4[2]; //(segment4[2])? 1'b1: 1'b0;	
 
-assign bitmap[203] = (segment3[2])? 1'b1: 1'b0;	
-assign bitmap[235] = (segment3[2])? 1'b1: 1'b0;	
-assign bitmap[267] = (segment3[2])? 1'b1: 1'b0;	
+assign bitmap[203] = segment3[2]; //(segment3[2])? 1'b1: 1'b0;	
+assign bitmap[235] = segment3[2]; //(segment3[2])? 1'b1: 1'b0;	
+assign bitmap[267] = segment3[2]; //(segment3[2])? 1'b1: 1'b0;	
 		
-assign bitmap[215] = (segment2[2])? 1'b1: 1'b0;	
-assign bitmap[247] = (segment2[2])? 1'b1: 1'b0;	
-assign bitmap[279] = (segment2[2])? 1'b1: 1'b0;	
+assign bitmap[215] = segment2[2]; //(segment2[2])? 1'b1: 1'b0;	
+assign bitmap[247] = segment2[2]; //(segment2[2])? 1'b1: 1'b0;	
+assign bitmap[279] = segment2[2]; //(segment2[2])? 1'b1: 1'b0;	
 		
-assign bitmap[221] = (segment1[2])? 1'b1: 1'b0;	
-assign bitmap[253] = (segment1[2])? 1'b1: 1'b0;	
-assign bitmap[285] = (segment1[2])? 1'b1: 1'b0;	
+assign bitmap[221] = segment1[2]; //(segment1[2])? 1'b1: 1'b0;	
+assign bitmap[253] = segment1[2]; //(segment1[2])? 1'b1: 1'b0;	
+assign bitmap[285] = segment1[2]; //(segment1[2])? 1'b1: 1'b0;	
 		
 //b
-assign bitmap[ 69] = (segment4[1])? 1'b1: 1'b0;	
-assign bitmap[101] = (segment4[1])? 1'b1: 1'b0;	
-assign bitmap[133] = (segment4[1])? 1'b1: 1'b0;	
+assign bitmap[ 69] = segment4[1]; //(segment4[1])? 1'b1: 1'b0;	
+assign bitmap[101] = segment4[1]; //(segment4[1])? 1'b1: 1'b0;	
+assign bitmap[133] = segment4[1]; //(segment4[1])? 1'b1: 1'b0;	
 		
-assign bitmap[ 75] = (segment3[1])? 1'b1: 1'b0;	
-assign bitmap[107] = (segment3[1])? 1'b1: 1'b0;	
-assign bitmap[139] = (segment3[1])? 1'b1: 1'b0;	
+assign bitmap[ 75] = segment3[1]; //(segment3[1])? 1'b1: 1'b0;	
+assign bitmap[107] = segment3[1]; //(segment3[1])? 1'b1: 1'b0;	
+assign bitmap[139] = segment3[1]; //(segment3[1])? 1'b1: 1'b0;	
 		
-assign bitmap[ 87] = (segment2[1])? 1'b1: 1'b0;	
-assign bitmap[119] = (segment2[1])? 1'b1: 1'b0;	
-assign bitmap[151] = (segment2[1])? 1'b1: 1'b0;	
+assign bitmap[ 87] = segment2[1]; //(segment2[1])? 1'b1: 1'b0;	
+assign bitmap[119] = segment2[1]; //(segment2[1])? 1'b1: 1'b0;	
+assign bitmap[151] = segment2[1]; //(segment2[1])? 1'b1: 1'b0;	
 		
-assign bitmap[ 93] = (segment1[1])? 1'b1: 1'b0;	
-assign bitmap[125] = (segment1[1])? 1'b1: 1'b0;	
-assign bitmap[157] = (segment1[1])? 1'b1: 1'b0;	
+assign bitmap[ 93] = segment1[1]; //(segment1[1])? 1'b1: 1'b0;	
+assign bitmap[125] = segment1[1]; //(segment1[1])? 1'b1: 1'b0;	
+assign bitmap[157] = segment1[1]; //(segment1[1])? 1'b1: 1'b0;	
 
 		
 //g
-assign bitmap[165:162] = (segment4[6])? 4'hf: 4'h0;	
-assign bitmap[171:168] = (segment3[6])? 4'hf: 4'h0; 	
-assign bitmap[183:180] = (segment2[6])? 4'hf: 4'h0; 	
-assign bitmap[189:186] = (segment1[6])? 4'hf: 4'h0;	
+assign bitmap[165:162] = {segment4[6], segment4[6], segment4[6], segment4[6]}; //(segment4[6])? 4'hf: 4'h0;	
+assign bitmap[171:168] = {segment3[6], segment3[6], segment3[6], segment3[6]}; //(segment3[6])? 4'hf: 4'h0; 	
+assign bitmap[183:180] = {segment2[6], segment2[6], segment2[6], segment2[6]}; //(segment2[6])? 4'hf: 4'h0; 	
+assign bitmap[189:186] = {segment1[6], segment1[6], segment1[6], segment1[6]}; //(segment1[6])? 4'hf: 4'h0;	
 		
 //dot_on
-assign bitmap[112:111] = (dot_on)? 2'b11: 2'b00;	
-assign bitmap[144:143] = (dot_on)? 2'b11: 2'b00;	
-assign bitmap[208:207] = (dot_on)? 2'b11: 2'b00;	
-assign bitmap[240:239] = (dot_on)? 2'b11: 2'b00;	
+assign bitmap[112:111] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;	
+assign bitmap[144:143] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;	
+assign bitmap[208:207] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;	
+assign bitmap[240:239] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;	
 `endif
 
 wire [7:0] w_data_displaying_clk;
@@ -253,21 +349,61 @@ assign w_data_displaying_clk[7:0] = (w_addr_displaying_clk == 511)? 8'h48 :
 
 
 // wr_en starts from the negtive edge of vram_wr_clk
-// and is held till data_in_rdy goes down
+// and is held till w_user_data_rdy goes down
 reg [1:0]   vram_wr_tap_4_user;
 wire        vram_wr_4_user_en;
-assign vram_wr_4_user_en = data_in_rdy & ((~vram_wr_clk) | vram_wr_tap_4_user[0]); // start from negative edge 
+assign vram_wr_4_user_en = w_user_data_rdy & ((~vram_wr_clk) | vram_wr_tap_4_user[0]); // start from negative edge 
 
 wire        vram_wr_4_clk_en;
 assign vram_wr_4_clk_en = (use_7_segment_code) & (~vram_wr_clk); // start from negative edge 
 
+`ifdef USE_USER_LIB
+`ifdef USE_N_BIT_ADDER
+wire [8:0] o_adder_vbuf_w_addr_user;
+defparam vbuf_w_addr_user.N = 9;
+N_bit_adder vbuf_w_addr_user(
+.sum (o_adder_vbuf_w_addr_user)     , // Output of the adder
+.carry()                            , // Carry output of adder
+.r1 (w_addr_user)                   , // first input
+.r2 (9'h001)                        , // second input
+.ci (1'b0)                            // carry input
+);
 
 
+wire [8:0] o_adder_vbuf_w_addr_displaying_clk;
+defparam vbuf_w_addr_displaying_clk.N = 9;
+N_bit_adder vbuf_w_addr_displaying_clk(
+.sum (o_adder_vbuf_w_addr_displaying_clk)     , // Output of the adder
+.carry()                                      , // Carry output of adder
+.r1 (w_addr_displaying_clk)                   , // first input
+.r2 (9'h001)                                  , // second input
+.ci (1'b0)                                      // carry input
+);
+
+`else // ~USE_N_BIT_ADDER
+wire [8:0] o_adder_vbuf_w_addr_user;
+defparam vbuf_w_addr_user.N = 9;
+N_bit_counter vbuf_w_addr_user(
+.result (o_adder_vbuf_w_addr_user)     , // Output of the adder
+.r1 (w_addr_user)                      , // first input
+.up (1'b1)
+);
+
+wire [8:0] o_adder_vbuf_w_addr_displaying_clk;
+defparam vbuf_w_addr_displaying_clk.N = 9;
+N_bit_counter vbuf_w_addr_displaying_clk(
+.result (o_adder_vbuf_w_addr_displaying_clk)     , // Output
+.r1 (w_addr_displaying_clk)                      , // input
+.up (1'b1)
+);
+`endif //USE_N_BIT_ADDER
+`endif //USE_USER_LIB
 always @(negedge vram_wr_clk) begin
     if(reset) begin
         w_addr_user <= 9'h000;
         w_addr_displaying_clk <= 9'd64;
         vram_wr_tap_4_user[1:0] <= 2'b00;
+        
 `ifdef BUFFER_BITMAP
         bitmap[ 31:  0] <= 32'h00000000;
         bitmap[ 63: 32] <= 32'h00000000;//32'h3cf00f3c;
@@ -284,18 +420,30 @@ always @(negedge vram_wr_clk) begin
         bitmap[415:384] <= 32'h00000000;
         bitmap[447:416] <= 32'h00000000;
 `endif
+
     end
     else begin
-	    vram_wr_tap_4_user[1:0] <= {vram_wr_tap_4_user[0], data_in_rdy};
+	    vram_wr_tap_4_user[1:0] <= {vram_wr_tap_4_user[0], w_user_data_rdy};
 		
  		w_addr_user <= ((use_7_segment_code) & (w_addr_user == LAST_BYTES_4_USER+1))? 0 : 
-                       (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1])? w_addr_user + 1 :
-                        w_addr_user;
+`ifdef USE_USER_LIB
+                        (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1] & ~w_user_cr & ~w_user_lf)? o_adder_vbuf_w_addr_user : //w_addr_user + 1 :
+`else
+                        (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1] & ~w_user_cr & ~w_user_lf)? w_addr_user + 1 :
+`endif
+                        (w_user_cr) ?  9'h000:
+                        (w_user_lf) ?  9'h000:
+                         w_addr_user;
 						
+        // this 9-bit adder has the shortest time to finish.  can only operate at 48MHz using the ripple carry adder
         w_addr_displaying_clk  <= (w_addr_displaying_clk == LAST_BYTES_4_CLK)? 9'd64 :
-                                  (~vram_wr_4_user_en & use_7_segment_code)?  w_addr_displaying_clk + 1:
-                                                                              w_addr_displaying_clk;
-
+`ifdef USE_USER_LIB
+                                  (~vram_wr_4_user_en & use_7_segment_code)? o_adder_vbuf_w_addr_displaying_clk[8:0] :  //w_addr_displaying_clk + 1: //
+`else
+                                  (~vram_wr_4_user_en & use_7_segment_code)? w_addr_displaying_clk + 1: //
+`endif
+                                                                             w_addr_displaying_clk;
+		
 `ifdef BUFFER_BITMAP
         //a
         bitmap[ 37: 34] <= (segment4[0])? 4'hf: 4'h0;	
@@ -409,12 +557,12 @@ assign vram_wr_en = vram_wr_4_user_en | vram_wr_4_clk_en;
 wire [8:0] w_addr; 
 assign w_addr[8:0] = (vram_wr_4_user_en)? w_addr_user [8:0] : w_addr_displaying_clk[8:0];
 wire [7:0] w_data;
-assign w_data [7:0] = (vram_wr_4_user_en)? data_in[7:0] : w_data_displaying_clk[7:0];
+assign w_data [7:0] = (vram_wr_4_user_en)? w_data_user[7:0] : w_data_displaying_clk[7:0];
  
 latticeDulPortRam512x8 mem0(
 .RDATA_c(r_data_wire[7:0]),  //7:0
 .RADDR_c(r_addr_wire[8:0]),        //8:0
-.RCLK_c(vram_rd_clk),
+.RCLK_c(vram_clk),//vram_rd_clk),
 .RCLKE_c(1'b1),
 .RE_c(1'b1),
 
@@ -443,6 +591,7 @@ input wire WE_c
 );
 
 SB_RAM512x8 #(
+//`define TEST_PAINT_SB_RAM
 `ifdef TEST_PAINT_SB_RAM
 .INIT_0 (256'h2020202020202020202020202020202020202020202020202020202020202020),
 .INIT_1 (256'h2020202020202020202020202020202020202020202020202020202020202020),
