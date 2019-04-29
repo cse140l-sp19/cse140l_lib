@@ -40,7 +40,8 @@
 //    dot_on -- dots between segment 2 and 3
 //
 // Example:
-//
+//  defparam uu1.CLKFREQ = 96000000;
+//  defparam uu1.BAUD    = 115200;
 //	vbuf uu1(
 //	.reset (Gl_rst),
 //	.vram_clk (clk),
@@ -53,6 +54,9 @@
 //	.segment4 (7'h7f),
 //	.dot_on   (1'b1),
 //	.alarm_on (1'b0),
+//  .enable_pulling_mode(1'b0);
+//  .data_sink_busy(urat_tx_busy),
+//  .cont_write_en(1'b0), // or 1
 //	.data_out(Gl_tx_data[7:0]),
 //	.data_out_rdy(Gl_tx_data_rdy)
 //	);
@@ -74,8 +78,12 @@ input  wire [6:0] segment4,
 input  wire       dot_on,
 input  wire       alarm_on,
 
-input  wire enable_async_read,  //1: use read data signal, 0: divide clk freq and output slowly
-input  wire read_strobe,        // read at the rising edge of this signal
+input  wire enable_pulling_mode,  //1: calling module pull data, data_sink_busy becomes pull_strobe
+input  wire data_sink_busy,       //0: vbug push data to calling module, data_sink_buy is busy signal 
+input  wire cont_write_en,        //1: calling module will write multiple bytes of data in one data_in_rdy strobe
+                                  //0: calling module will not write multiple bytes of data in one rdy strobe and could
+								  //   generate a long strobe
+
 output wire [7:0] data_out , 
 output wire data_out_rdy
 ) ;
@@ -91,89 +99,132 @@ output wire data_out_rdy
 parameter CLKFREQ  = 12000000;    // frequency of incoming signal 'clk'
 parameter BAUD     =  115200;
 `define BITS_PER_BYTE 10  //1 start, 2 stop bits
-localparam CYCLES_PER_BYTE = ((`CLKFREQ / `BAUD) * `BITS_PER_BYTE) + 60; //11'd1100; //11'd1050; 
+`define PAD_CYCLES    60
+localparam CYCLES_PER_BYTE = ((CLKFREQ / BAUD) * `BITS_PER_BYTE) + `PAD_CYCLES; //11'd1100; //11'd1050; 
+localparam CYCLES_PER_4_BITS = CYCLES_PER_BYTE/2;
+localparam COUNT_WIDTH = $clog2(CYCLES_PER_4_BITS);
+//localparam CYCLES_PER_BYTE = 11'd1100; //11'd1050; 
+//localparam CYCLES_PER_4_BITS = 10'd550;
+//localparam COUNT_WIDTH = 10;
+
 //parameter for display
 localparam BYTES_PER_RAW = 32;
 localparam RAWS_4_USER = 2;
 localparam RAWS_4_CLK = 14;
 localparam LAST_BYTES_4_USER  = (RAWS_4_USER*BYTES_PER_RAW - 1);               //user can input 64 bytes
-//parameter LAST_BYTES_4_CLK = ((RAWS_4_CLK + RAWS_4_USER)* BYTES_PER_RAW - 3 - 1); //64 - 508 is for displaying clk
 localparam LAST_BYTES_4_CLK = ((RAWS_4_CLK + RAWS_4_USER)* BYTES_PER_RAW - 1); //64 - 511 is for displaying clk
 
-// hold data read from sb_ram
-reg [8:0] r_addr;
-wire [8:0] r_addr_wire;
+//----- Read Port: hold read data that is read from sb_ram
+reg [8:0] r_addr;       // local FF
+wire [8:0] r_addr_wire; // output to SRAM module
 assign r_addr_wire [8:0] = r_addr [8:0];
-reg [7:0] r_data_reg;
-wire [7:0] r_data_wire;
+
+reg [7:0] r_data_reg;   // local FF
+wire [7:0] r_data_wire; // input from SRAM module
 assign data_out[7:0] = r_data_reg [7:0];
+
+reg  r_data_rdy;       // local FF 
+assign data_out_rdy = r_data_rdy;
+
 
 //------------------- use read strobe ---------------------------------------------
 
 //------------------- use internal clock divider to slow down the read -------------------
-// control the read clk
-reg [10:0] l_count;  
+//  vram_rd_clk_h_l -- latch r_data_reg -- data_out_rdy_h -- data_out_rdy_l(a pulse of 1 clk)-- trig_rd_h -- trig_rd_l (a short pulse) - vram_rd_clk_h 
+// trig to update read port's address
+// read clk
+reg vram_rd_clk;
 
-wire [10:0] cycles_per_byte = CYCLES_PER_BYTE;
+wire r_clk_en;
+assign r_clk_en = 1'b1;
+localparam rd_clk_init   =  1;  //start from high
+// control the read operation
+`define COUNT_WIDTHH  COUNT_WIDTH
+localparam PRE_COUNTER_WIDTH = 4;
+localparam PRE_COUNTER_MAX_NUMBER = 15;
+localparam SECOND_COUNTER_WIDTH = COUNT_WIDTH - PRE_COUNTER_WIDTH;
+reg [COUNT_WIDTH-1:0] l_count;  
+reg l_count_15;
 
 `ifdef USE_USER_LIB
-
 `ifdef USE_N_BIT_ADDER
-defparam vbuf_count.N = 11;
-wire [10:0] o_adder_vbuf_count;
+
+defparam vbuf_count.N = COUNT_WIDTH;
+wire [COUNT_WIDTH-1:0] l_count_next;
 N_bit_adder vbuf_count(
-.sum (o_adder_vbuf_count[10:0])   , // Output of the adder
-.carry()                          , // Carry output of adder
-.r1 (l_count[10:0])               , // first input
-.r2 (11'h001)                        , // second input
-.ci (1'b0)                            // carry input
+.sum (l_count_next[COUNT_WIDTH-1:0])   , // Output of the adder
+.carry()                                              , // Carry output of adder
+.r1 (l_count[COUNT_WIDTH-1:0])               , // first input
+.r2 (COUNT_WIDTH'h001)                       , // second input
+.ci (1'b0)                                              // carry input
 );
 
 `else  // ~USE_N_BIT_ADDER
-wire [10:0] o_adder_vbuf_count;
-defparam vbuf_count.N = 11;
+
+wire [COUNT_WIDTH-1:0] l_count_next;
+defparam vbuf_count.N = COUNT_WIDTH;
 N_bit_counter vbuf_count(
-.result (o_adder_vbuf_count)       , // Output
-.r1 (l_count)                      , // input
+.result (l_count_next[COUNT_WIDTH-1:0])       , // Output
+.r1 (l_count[COUNT_WIDTH-1:0])               , // input
 .up (1'b1)
 );
 `endif  // ~USE_N_BIT_ADDER
-`endif  // USE_USER_LIB
-//generate clk for reading 1-byte from the read port
-always @(posedge vram_clk) begin
-    if(reset | enable_async_read) begin
-        l_count <= 0;
+`else   // ~USE_USER_LIB
+wire [COUNT_WIDTH-1:0] l_count_next = l_count +1;
+`endif
+
+//generate signal for reading 1-byte from the read port
+localparam l_count_reset = CYCLES_PER_4_BITS - 15;
+localparam l_count_reset_l_n = CYCLES_PER_4_BITS & 'h00f; ///(PRE_COUNTER_MAX_NUMBER+1) * (PRE_COUNTER_MAX_NUMBER+1);
+localparam l_count_trig_rd = `PAD_CYCLES/8;
+localparam l_count_init    = CYCLES_PER_4_BITS/2 + 1;
+localparam l_count_rise_rdy = `PAD_CYCLES/8;
+//localparam l_count_lower_rdy = l_count_reset - `PAD_CYCLES/4;
+// trig rd address to advance by 1
+wire trig_rd = ~((vram_rd_clk) | (|(l_count[COUNT_WIDTH-1:0] ^ l_count_trig_rd)));
+
+always @(posedge vram_clk or posedge reset) begin
+    if(reset) begin
+        l_count <= l_count_init;
+        vram_rd_clk <= rd_clk_init;
+        l_count_15 <= 0;
     end
     else begin
-        if(l_count[10:0] == cycles_per_byte)
-            l_count <= 0;
-        else 
-`ifdef USE_USER_LIB
-            l_count[10:0] <= o_adder_vbuf_count[10:0]; 
-`else
-            l_count[10:0] <= l_count+1; //o_adder_vbuf_count[10:0]; //
-`endif
+        if(~|(l_count ^ l_count_reset)) begin
+            vram_rd_clk <= ~vram_rd_clk;
+			l_count[COUNT_WIDTH-1:0] <= 8'h00;
+        end
+		else begin
+            l_count <= l_count_next; 
+            vram_rd_clk <= vram_rd_clk;
+		end
+		
+		if((~|(l_count ^ l_count_rise_rdy)) & (vram_rd_clk))
+		    r_data_rdy <= 1;
+		//else 
+		//if(~|(l_count ^ l_count_lower_rdy) & (vram_rd_clk))
+		//    r_data_rdy <= 0;
+		else r_data_rdy <= 0; //r_data_rdy;
     end
 end
+//----- end of read signal generator
+//----- latch in rd_data at the negedge of vram_rd_clk
+reg [1:0] vram_rd_clk_det;
+wire vram_rd_data_strob = vram_rd_clk_det[1] & ~vram_rd_clk_det[0];
+wire [7:0] r_data_reg_next = (vram_rd_data_strob)? r_data_wire[7:0]: r_data_reg[7:0];
 
-//  trig_rd_h -- trig_rd_l - data_out_rdy_h .... data_out_rdy_l
-assign data_out_rdy = l_count [10]; 
-
-wire trig_rd;
-assign trig_rd = (&l_count[9:1]) & (~l_count[10]);
-
-// slow down read clk
-wire vram_rd_clk;
-assign vram_rd_clk = l_count[4];
-//reg [1:0] vram_rd_clk_det;
-// latch in @ the negedge of read clk
-always @(negedge vram_rd_clk) begin
-//always @ (negedge vram_clk) begin
-//    vram_rd_clk_det[1:0] = {vram_rd_clk_det[0], vram_rd_clk};
-    
-//    r_data_reg[7:0] <= (vram_rd_clk_det[0] & ~vram_rd_clk_det[1])? r_data_wire[7:0]: r_data_reg[7:0];
-    r_data_reg[7:0] <= r_data_wire[7:0];
+// latch in @ the negedge of vram_rd_clk
+always @ (negedge vram_clk or posedge reset) begin
+    if(reset) begin
+        vram_rd_clk_det[1:0] <= 2'b11;//{rd_clk_init, rd_clk_init};
+    end
+	else begin
+        vram_rd_clk_det[1:0] <= {vram_rd_clk_det[0], vram_rd_clk};
+        r_data_reg[7:0] <= r_data_reg_next;
+    end
 end
+//------- end of latch in rd_data
+//-------  update r_addr @ the falling edge of vram_rd_clk 
 `ifdef USE_USER_LIB
 `ifdef USE_N_BIT_ADDER
 wire [8:0] o_adder_vbuf_r_addr;
@@ -198,20 +249,25 @@ N_bit_counter vbuf_raddr(
 `endif // USE_USER_LIB
 
 reg [1:0] trig_rd_det;
+wire trig_rd_is_det = trig_rd_det[0] & ~trig_rd_det[1]; 
+`ifdef USE_USER_LIB
+wire [8:0] r_addr_next = (trig_rd_is_det)? o_adder_vbuf_r_addr[8:0]: r_addr[8:0];  
+`else
+wire [8:0] r_addr_next = (trig_rd_is_det)? r_addr + 1: r_addr[8:0];  
+`endif
+
 //always @(posedge trig_rd) begin
 always @(posedge vram_clk) begin
-    if(reset)
+    if(reset) begin
 	    r_addr <= 0;
-	else
-       trig_rd_det[1:0] = {trig_rd_det[0], trig_rd};
-`ifdef USE_USER_LIB
-        r_addr[8:0] <=  (trig_rd_det[0] & ~trig_rd_det[1])? o_adder_vbuf_r_addr[8:0]: r_addr[8:0]; 
-        //r_addr[8:0] <=  o_adder_vbuf_r_addr[8:0]; 
-`else
-        r_addr[8:0] <=  (trig_rd_det[0] & ~trig_rd_det[1])? r_addr + 1: r_addr[8:0]; 
-        //r_addr[8:0] <=  r_addr + 1; 
-`endif
+        trig_rd_det <= 0;
+    end
+	else begin
+       trig_rd_det[1:0] <= {trig_rd_det[0], trig_rd};
+       r_addr <= r_addr_next;
+    end
 end
+//---------- end of update rd_addr
 
 //---------- write port
 //wire vram_wr_clk;
@@ -219,30 +275,19 @@ end
 // address -- address 0-63 for user input
 //                    64 - 509 for displying clk
 reg       w_user_data_rdy;
-reg [7:0] w_user_data;
+reg [7:0] w_user_data_in;
 reg       w_user_cr;
 reg       w_user_lf;
 
-reg [8:0] w_addr_user, w_addr_displaying_clk;
-wire [7:0] w_data_user = w_user_data[7:0];
+reg [8:0] w_addr_user, w_addr_displaying;
+wire [7:0] w_data_user = w_user_data_in[7:0];
 
-always @*// (posedge vram_clk)
+always @ *//(posedge vram_clk)
 begin
-        w_user_data_rdy = 0;
-        w_user_cr = 0;
-        w_user_lf = 0;
-        w_user_data[7:0] = 8'h00;
-
-        if(~(|data_in[7:4]) & data_in[3] & data_in[2] & (~data_in[1]) & data_in[0])     //  == 8'h0D) begin    //CR
-            w_user_cr = 1;
-		else 
-		if (~(|data_in[7:4]) & data_in[3] & (~data_in[2]) & data_in[1] & (~data_in[0])) //  == 8'h0A) begin    //LF
-            w_user_lf = 1;
-		else
-		begin
-            w_user_data_rdy = data_in_rdy;
-            w_user_data[7:0] = data_in[7:0];
-		end
+        w_user_cr = (~|(data_in ^ 8'h0D));
+        w_user_lf = (~|(data_in ^ 8'h0A));
+        w_user_data_rdy = (w_user_cr|w_user_cr)? 0 : data_in_rdy;
+        w_user_data_in = data_in;
 end
 
 // bitmap [(512-64):0] for displaying clock
@@ -345,20 +390,20 @@ assign bitmap[208:207] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;
 assign bitmap[240:239] = {dot_on, dot_on}; //(dot_on)? 2'b11: 2'b00;	
 `endif
 
-wire [7:0] w_data_displaying_clk;
+wire [7:0] w_data_displaying;
 wire [8:0] w_bitmap_indx;
-assign w_bitmap_indx = w_addr_displaying_clk - 9'd64;
-assign w_data_displaying_clk[7:0] = (w_addr_displaying_clk == 511)? 8'h48 :
-                                    (w_addr_displaying_clk == 510)? 8'h5b :
-                                    (w_addr_displaying_clk == 509)?  8'h1b:
-                                    (bitmap[w_bitmap_indx]) ? 8'h2a : 8'h20;             
+assign w_bitmap_indx = w_addr_displaying - 9'd64;
+assign w_data_displaying[7:0] = (w_addr_displaying == 511)? 8'h48 :
+                                (w_addr_displaying == 510)? 8'h5b :
+                                (w_addr_displaying == 509)?  8'h1b:
+                                (bitmap[w_bitmap_indx]) ? 8'h2a : 8'h20;             
 
 
 // wr_en starts from the negtive edge of vram_clk
 // and is held till w_user_data_rdy goes down
 reg [1:0]   vram_wr_tap_4_user;
 wire        vram_wr_4_user_en;
-assign vram_wr_4_user_en = w_user_data_rdy & ((~vram_clk) | vram_wr_tap_4_user[0]); // start from negative edge 
+assign vram_wr_4_user_en = w_user_data_rdy;//TST & ((~vram_clk) | vram_wr_tap_4_user[0]); // start from negative edge 
 
 wire        vram_wr_4_clk_en;
 assign vram_wr_4_clk_en = (use_7_segment_code) & (~vram_clk); // start from negative edge 
@@ -376,12 +421,12 @@ N_bit_adder vbuf_w_addr_user(
 );
 
 
-wire [8:0] o_adder_vbuf_w_addr_displaying_clk;
-defparam vbuf_w_addr_displaying_clk.N = 9;
-N_bit_adder vbuf_w_addr_displaying_clk(
-.sum (o_adder_vbuf_w_addr_displaying_clk)     , // Output of the adder
+wire [8:0] o_adder_vbuf_w_addr_displaying;
+defparam vbuf_w_addr_displaying.N = 9;
+N_bit_adder vbuf_w_addr_displaying(
+.sum (o_adder_vbuf_w_addr_displaying)     , // Output of the adder
 .carry()                                      , // Carry output of adder
-.r1 (w_addr_displaying_clk)                   , // first input
+.r1 (w_addr_displaying)                   , // first input
 .r2 (9'h001)                                  , // second input
 .ci (1'b0)                                      // carry input
 );
@@ -395,19 +440,23 @@ N_bit_counter vbuf_w_addr_user(
 .up (1'b1)
 );
 
-wire [8:0] o_adder_vbuf_w_addr_displaying_clk;
-defparam vbuf_w_addr_displaying_clk.N = 9;
-N_bit_counter vbuf_w_addr_displaying_clk(
-.result (o_adder_vbuf_w_addr_displaying_clk)     , // Output
-.r1 (w_addr_displaying_clk)                      , // input
+wire [8:0] o_adder_vbuf_w_addr_displaying;
+defparam vbuf_w_addr_displaying.N = 9;
+N_bit_counter vbuf_w_addr_displaying(
+.result (o_adder_vbuf_w_addr_displaying)     , // Output
+.r1 (w_addr_displaying)                      , // input
 .up (1'b1)
 );
 `endif //USE_N_BIT_ADDER
 `endif //USE_USER_LIB
+
+wire det_rdy_edge = (cont_write_en)? w_user_data_rdy: (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1]);
+wire not_special_char = ~(w_user_cr | w_user_lf);
+
 always @(negedge vram_clk) begin
     if(reset) begin
         w_addr_user <= 9'h000;
-        w_addr_displaying_clk <= 9'd64;
+        w_addr_displaying <= 9'd64;
         vram_wr_tap_4_user[1:0] <= 2'b00;
         
 `ifdef BUFFER_BITMAP
@@ -429,26 +478,27 @@ always @(negedge vram_clk) begin
 
     end
     else begin
-	    vram_wr_tap_4_user[1:0] <= {vram_wr_tap_4_user[0], w_user_data_rdy};
+       vram_wr_tap_4_user[1:0] <= {vram_wr_tap_4_user[0], w_user_data_rdy};
 		
- 		w_addr_user <= ((use_7_segment_code) & (w_addr_user == LAST_BYTES_4_USER+1))? 0 : 
+       w_addr_user <= ((use_7_segment_code) & (w_addr_user == LAST_BYTES_4_USER+1))? 0 : 
+
 `ifdef USE_USER_LIB
-                        (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1] & ~w_user_cr & ~w_user_lf)? o_adder_vbuf_w_addr_user : //w_addr_user + 1 :
+                        (det_rdy_edge & not_special_char)? o_adder_vbuf_w_addr_user : //w_addr_user + 1 :
 `else
-                        (vram_wr_tap_4_user[0] & ~vram_wr_tap_4_user[1] & ~w_user_cr & ~w_user_lf)? w_addr_user + 1 :
+                        (det_rdy_edge & not_special_char)? w_addr_user + 1 :
 `endif
-                        (w_user_cr) ?  9'h000:
-                        (w_user_lf) ?  9'h000:
-                         w_addr_user;
+                      (w_user_cr) ?  9'h000:
+                      (w_user_lf) ?  9'h000:
+                      w_addr_user;
 						
         // this 9-bit adder has the shortest time to finish.  can only operate at 48MHz using the ripple carry adder
-        w_addr_displaying_clk  <= (w_addr_displaying_clk == LAST_BYTES_4_CLK)? 9'd64 :
+        w_addr_displaying  <= (w_addr_displaying == LAST_BYTES_4_CLK)? 9'd64 :
 `ifdef USE_USER_LIB
-                                  (~vram_wr_4_user_en & use_7_segment_code)? o_adder_vbuf_w_addr_displaying_clk[8:0] :  //w_addr_displaying_clk + 1: //
+                                  (~vram_wr_4_user_en & use_7_segment_code)? o_adder_vbuf_w_addr_displaying[8:0] :  //w_addr_displaying + 1: //
 `else
-                                  (~vram_wr_4_user_en & use_7_segment_code)? w_addr_displaying_clk + 1: //
+                                  (~vram_wr_4_user_en & use_7_segment_code)? w_addr_displaying + 1: //
 `endif
-                                                                             w_addr_displaying_clk;
+                                                                             w_addr_displaying;
 		
 `ifdef BUFFER_BITMAP
         //a
@@ -561,15 +611,15 @@ end
 wire vram_wr_en;
 assign vram_wr_en = vram_wr_4_user_en | vram_wr_4_clk_en;
 wire [8:0] w_addr; 
-assign w_addr[8:0] = (vram_wr_4_user_en)? w_addr_user [8:0] : w_addr_displaying_clk[8:0];
+assign w_addr[8:0] = (vram_wr_4_user_en)? w_addr_user [8:0] : w_addr_displaying[8:0];
 wire [7:0] w_data;
-assign w_data [7:0] = (vram_wr_4_user_en)? w_data_user[7:0] : w_data_displaying_clk[7:0];
+assign w_data [7:0] = (vram_wr_4_user_en)? w_data_user[7:0] : w_data_displaying[7:0];
  
 latticeDulPortRam512x8 mem0(
 .RDATA_c(r_data_wire[7:0]),  //7:0
-.RADDR_c(r_addr_wire[8:0]),        //8:0
-.RCLK_c(vram_rd_clk), //vram_rd_clk),
-.RCLKE_c(1'b1),
+.RADDR_c(r_addr_wire[8:0]),  //8:0
+.RCLK_c(vram_clk),        //vram_rd_clk),
+.RCLKE_c(r_clk_en),
 .RE_c(1'b1),
 
 .WADDR_c(w_addr[8:0]),
