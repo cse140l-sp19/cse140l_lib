@@ -70,39 +70,39 @@ module bcd2segment (
    reg 		       fifteen;
 
    always @(num[3:0]) begin
-      zero = 1'b0;
-      one = 1'b0;
-      two = 1'b0;
-      three = 1'b0;
-      four = 1'b0;
-      five = 1'b0;
-      six = 1'b0;
-      seven = 1'b0;
-      eight = 1'b0;
-      nine = 1'b0;
-      ten = 1'b0;
-      eleven = 1'b0;
-      twelve = 1'b0;
+      zero     = 1'b0;
+      one      = 1'b0;
+      two      = 1'b0;
+      three    = 1'b0;
+      four     = 1'b0;
+      five     = 1'b0;
+      six      = 1'b0;
+      seven    = 1'b0;
+      eight    = 1'b0;
+      nine     = 1'b0;
+      ten      = 1'b0;
+      eleven   = 1'b0;
+      twelve   = 1'b0;
       thirteen = 1'b0;
       fourteen = 1'b0;
-      fifteen = 1'b0;
+      fifteen  = 1'b0;
       case (num[3:0])
-	4'b0000 : zero = 1;           // 0
-	4'b0001 : one = 1;            // 1
-	4'b0010 : two = 1;            // 2
-	4'b0011 : three = 1;          // 3
-	4'b0100 : four = 1;           // 4
-	4'b0101 : five = 1;           // 5 
-	4'b0110 : six = 1;            // 6
-	4'b0111 : seven = 1;          // 7
-	4'b1000 : eight = 1;          // 8
-	4'b1001 : nine = 1;           // 9
-	4'b1010 : ten = 1;             // A
-	4'b1011 : eleven = 1;          // b
-	4'b1100 : twelve = 1;          // C
+	4'b0000 : zero     = 1;        // 0
+	4'b0001 : one      = 1;        // 1
+	4'b0010 : two      = 1;        // 2
+	4'b0011 : three    = 1;        // 3
+	4'b0100 : four     = 1;        // 4
+	4'b0101 : five     = 1;        // 5 
+	4'b0110 : six      = 1;        // 6
+	4'b0111 : seven    = 1;        // 7
+	4'b1000 : eight    = 1;        // 8
+	4'b1001 : nine     = 1;        // 9
+	4'b1010 : ten      = 1;        // A
+	4'b1011 : eleven   = 1;        // b
+	4'b1100 : twelve   = 1;        // C
 	4'b1101 : thirteen = 1;        // d
 	4'b1110 : fourteen = 1;        // E
-	4'b1111 : fifteen = 1;         // F
+	4'b1111 : fifteen  = 1;        // F
       endcase // case (num[3:0])
    end
 
@@ -122,23 +122,17 @@ module bcd2segment (
 		      eight | nine | ten | eleven | thirteen) ;
    
    // d
-   assign segmentUQ[3] = (
-		      zero | two | three | five | six | eight |
-		      eleven | twelve | thirteen | fourteen) ;
+   // assign segmentUQ[3] = ( ... );
    
    // e
-   assign segmentUQ[4] = (
-		      zero | two | six | eight |
-		      ten | eleven | twelve | thirteen | fourteen | fifteen);
+   // assign segmentUQ[4] = ( ... );
+
    
    // f
-   assign segmentUQ[5] = (
-		      zero | four | five | six | eight | nine | ten |
-		      eleven | twelve | fourteen | fifteen) ;
+   // assign segmentUQ[5] = ( ... );
+
    // g
-   assign segmentUQ[6] = ( 
-		      two | three | four | five | six | eight |
-		      nine | ten | eleven | thirteen | fourteen | fifteen);
+   // assign segmentUQ[6] = ( ... );
 
    assign segment = {7{enable}} & segmentUQ;
    
