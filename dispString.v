@@ -2,7 +2,7 @@
 // dispString
 // this block takes in 8 bytes (b0 to b7 ) and streams them out
 // to dOut one byte at a time. For each byte, the rdy
-// output will transition from low to high.
+// output will be logic 1.
 //
 // dispString will start streaming when "go" is asserted for one cycle.
 // dInP, and rdyInP are currently not used but could be used to chain
